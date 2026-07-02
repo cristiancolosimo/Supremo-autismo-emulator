@@ -159,10 +159,30 @@ def _wait_until_settled(q: QemuProcess, log: Path, cap: int,
             return
 
 
+def _fingerprint(firmware: Path) -> str:
+    """sha256 corto del contenuto del firmware: chiave di cache content-based."""
+    import hashlib
+    return hashlib.sha256(firmware.read_bytes()).hexdigest()[:16]
+
+
 def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
-        reuse: bool = True, tap: str | None = None, keep_alive: bool = False) -> RunState:
+        reuse: bool = True, tap: str | None = None, keep_alive: bool = False,
+        rebuild: bool = False) -> RunState:
     print(f"[*] firmware: {firmware}")
     slug = firmware.stem   # sotto-cartella scratch = nome del binario (senza .bin), non un id numerico
+    work = cfg.scratch / slug
+
+    # cache content-based: se il firmware è cambiato (o --rebuild), butta la work dir
+    # così extract/immagine/log ripartono puliti invece di riusare roba stantia
+    # (prima la cache era chiavata solo sul nome file → stale se il .bin cambiava).
+    import shutil
+    fp, fpfile = _fingerprint(firmware), work / ".fingerprint"
+    if work.exists() and (rebuild or (fpfile.exists() and fpfile.read_text() != fp)):
+        print(f"[*] cache invalidata ({'--rebuild' if rebuild else 'firmware cambiato'})")
+        shutil.rmtree(work)
+    work.mkdir(parents=True, exist_ok=True)
+    fpfile.write_text(fp)
+
     rootfs = extract.extract(cfg, firmware, iid)
     print(f"[*] rootfs:   {rootfs}")
     arch = archmod.detect(rootfs)
@@ -177,12 +197,7 @@ def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
                      init=det.init or "", web_service=det.service)
 
     # ---- (1) inference boot: network_type=None ----
-    image.prepare(cfg, rootfs, arch)
-    _write_runtime(rootfs, det, NetworkType.NONE, "", "")
-    img = image.seal(cfg, slug, rootfs)
-    print(f"[*] image:    {img} ({img.stat().st_size // 1024} KiB)")
-
-    work = cfg.scratch / slug
+    image.prepare(cfg, rootfs, arch)   # popola /firmadyne nella dir (idempotente, serve anche al verify)
     init_log = work / "qemu.initial.serial.log"
     # il kernel esegue il NOSTRO wrapper (busybox statico): avvia l'harness e poi exec-a
     # l'init vero. Agnostico al busybox del guest / al supporto di /etc/inittab.
@@ -190,6 +205,10 @@ def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
     if reuse and init_log.exists() and init_log.stat().st_size > 4096:
         print(f"[*] inference boot SALTATO (log in cache: {init_log})")
     else:
+        # sigilla l'immagine SOLO quando serve bootare davvero (altrimenti mke2fs sprecato)
+        _write_runtime(rootfs, det, NetworkType.NONE, "", "")
+        img = image.seal(cfg, slug, rootfs)
+        print(f"[*] image:    {img} ({img.stat().st_size // 1024} KiB)")
         print(f"[*] inference boot (max {cfg.infer_timeout}s, early-exit ad assestamento)...")
         cmd = build_cmd(cfg, arch, img, init_log, NetPlan(), qemu_init)
         with QemuProcess(cmd) as q:
