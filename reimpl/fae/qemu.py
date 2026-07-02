@@ -5,6 +5,7 @@ Nessun `kill $(ps aux | grep qemu ...)` (bug #5): il processo si termina dal suo
 """
 from __future__ import annotations
 
+import os
 import signal
 import socket
 import subprocess
@@ -132,16 +133,33 @@ class QemuProcess:
             s.connect(str(self.monitor_sock))
             s.sendall(command.encode() + b"\n")
 
+    def _wait(self, timeout: int) -> None:
+        # Immune al Ctrl-C ripetuto: durante il teardown l'utente spesso pesta Ctrl-C
+        # più volte. Senza questo, un KeyboardInterrupt qui aborta il teardown e QEMU
+        # resta orfano (bug: qemu continua a girare dopo Ctrl-C).
+        while True:
+            try:
+                with suppress(subprocess.TimeoutExpired):
+                    self.proc.wait(timeout=timeout)
+                return
+            except KeyboardInterrupt:
+                continue
+
+    def _signal_group(self, sig: int) -> None:
+        # start_new_session=True ⇒ QEMU (e i suoi figli) sono in una process-group
+        # dedicata col PID di QEMU come leader: killiamo l'intero gruppo.
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(self.proc.pid, sig)
+
     def __exit__(self, *exc) -> None:
         if self.proc and self.proc.poll() is None:
             self._qmp("system_powerdown")   # shutdown pulito via monitor, se disponibile
-            with suppress(subprocess.TimeoutExpired):
-                self.proc.wait(timeout=5)
+            self._wait(5)
             if self.proc.poll() is None:
-                self.proc.send_signal(signal.SIGTERM)
-                with suppress(subprocess.TimeoutExpired):
-                    self.proc.wait(timeout=3)
+                self._signal_group(signal.SIGTERM)
+                self._wait(3)
             if self.proc.poll() is None:
-                self.proc.kill()
+                self._signal_group(signal.SIGKILL)
+                self._wait(2)
         if self._stderr_fh:
             self._stderr_fh.close()
