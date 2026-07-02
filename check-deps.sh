@@ -13,10 +13,7 @@ declare -A DEPS=(
   [file]="file file  rileva architettura/endianness"
   [python3]="python3 python  orchestratore (>=3.11)"
   [ip]="iproute iproute2  crea/gestisce il TAP (setup-tap.sh)"
-)
-# opzionali (non bloccano)
-declare -A OPT=(
-  [binwalk]="—(cargo) —(cargo)  estrae il firmware (cargo install binwalk, v3)"
+  [binwalk]="—(cargo) —(cargo)  estrae il firmware (cargo install binwalk, OBBLIGATORIA v3)"
   [telnet]="telnet inetutils  client per la shell di debug (--keep-alive)"
   [curl]="curl curl  test manuale del web"
 )
@@ -59,15 +56,16 @@ report() {
   done
 }
 echo "-- richieste --"; report DEPS req
-echo "-- opzionali --"; report OPT opt
 
 # controlli fini
 if command -v python3 >/dev/null; then
   python3 -c 'import sys; sys.exit(0 if sys.version_info>=(3,11) else 1)' \
     || { echo "  [WARN] python3 < 3.11"; miss=$((miss+1)); }
 fi
-command -v binwalk >/dev/null && { binwalk --version 2>/dev/null | grep -q " 3" \
-  || echo "  [WARN] binwalk non v3 (serve la v3 rust: cargo install binwalk)"; }
+if command -v binwalk >/dev/null; then
+  binwalk --version 2>/dev/null | grep -q " 3" \
+    || { echo "  [FAIL] binwalk non v3 (serve la v3 rust: cargo install binwalk)"; miss=$((miss+1)); }
+fi
 
 echo
 if [ "$miss" -eq 0 ]; then
