@@ -36,7 +36,7 @@ def _find_rootfs(extract_dir: Path) -> Path:
 
 def extract(cfg: Config, firmware: Path, iid: int) -> Path:
     """Estrae il firmware; ritorna il path della directory rootfs."""
-    work = cfg.scratch / str(iid)
+    work = cfg.scratch / firmware.stem
     out = work / "extract"
     if out.exists():
         # riuso: se già estratto, non rifare (idempotente)

@@ -162,6 +162,7 @@ def _wait_until_settled(q: QemuProcess, log: Path, cap: int,
 def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
         reuse: bool = True, tap: str | None = None, keep_alive: bool = False) -> RunState:
     print(f"[*] firmware: {firmware}")
+    slug = firmware.stem   # sotto-cartella scratch = nome del binario (senza .bin), non un id numerico
     rootfs = extract.extract(cfg, firmware, iid)
     print(f"[*] rootfs:   {rootfs}")
     arch = archmod.detect(rootfs)
@@ -178,10 +179,10 @@ def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
     # ---- (1) inference boot: network_type=None ----
     image.prepare(cfg, rootfs, arch)
     _write_runtime(rootfs, det, NetworkType.NONE, "", "")
-    img = image.seal(cfg, iid, rootfs)
+    img = image.seal(cfg, slug, rootfs)
     print(f"[*] image:    {img} ({img.stat().st_size // 1024} KiB)")
 
-    work = cfg.scratch / str(iid)
+    work = cfg.scratch / slug
     init_log = work / "qemu.initial.serial.log"
     # il kernel esegue il NOSTRO wrapper (busybox statico): avvia l'harness e poi exec-a
     # l'init vero. Agnostico al busybox del guest / al supporto di /etc/inittab.
@@ -206,7 +207,7 @@ def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
     prim_ip = plan.ips[0] if plan.ips else "192.168.0.1"
     _write_runtime(rootfs, det, plan.network_type, bridge, iface, ip=prim_ip,
                    shell=keep_alive)
-    img = image.seal(cfg, iid, rootfs)
+    img = image.seal(cfg, slug, rootfs)
 
     final_log = work / "qemu.final.serial.log"
     state.ip = plan.ips[0] if plan.ips else ""

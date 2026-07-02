@@ -86,9 +86,9 @@ def prepare(cfg: Config, rootfs: Path, arch: str) -> None:
     install_firmadyne(cfg, rootfs, arch)
 
 
-def seal(cfg: Config, iid: int, rootfs: Path) -> Path:
-    """Sigilla la dir rootfs (già preparata) in scratch/<iid>/image.ext2. No root."""
-    work = cfg.scratch / str(iid)
+def seal(cfg: Config, slug: str, rootfs: Path) -> Path:
+    """Sigilla la dir rootfs (già preparata) in scratch/<slug>/image.ext2. No root."""
+    work = cfg.scratch / str(slug)
     work.mkdir(parents=True, exist_ok=True)
     image = work / "image.ext2"
 
