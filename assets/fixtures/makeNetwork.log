@@ -1,0 +1,17 @@
+[*] Infer test: /etc/rc.d/rcS (POSIX shell script, ASCII text executable)
+[*] web service: /usr/bin/httpd
+Running firmware 1: terminating after 240 secs...
+qemu-system-mips: terminating on signal 2 from pid 48526 (timeout)
+Infer NVRAM default file!
+
+[*] Interfaces: []
+[*] ports: []
+[*] networkInfo: []
+[-] no network interface: bring up default network
+[*] filter network info: [('192.168.0.1', 'eth0', None, None, 'br0')]
+===== Check inferred emulation start =====
+[*] Inferred network: terminating after 240 secs...
+[*] Waiting web service... from 192.168.0.1: terminating after 360 secs...
+qemu-system-mips: terminating on signal 15 from pid 52151 ()
+=====  Check inferred emulation end  =====
+qemu-system-mips: network script /etc/qemu-ifdown failed with status 256
