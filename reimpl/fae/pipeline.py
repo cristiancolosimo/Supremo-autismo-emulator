@@ -59,11 +59,18 @@ $BB mount -t proc proc /proc 2>/dev/null
 $BB mount -t sysfs sysfs /sys 2>/dev/null
 $BB mkdir -p /dev/pts
 $BB mount -t devpts devpts /dev/pts 2>/dev/null
-{bringup}/firmadyne/network.sh &
+{console}{bringup}/firmadyne/network.sh &
 /firmadyne/run_service.sh &
 /firmadyne/debug.sh &
 exec {real_init}
 """
+
+# Console di root su ttyS1, avviata dal launcher PRIMA dell'init del firmware: shell
+# indipendente dalla rete e dallo stato del firmware (funziona anche se l'init si incastra).
+# Respawn in loop col nostro busybox statico. La seconda seriale di QEMU è un socket unix
+# lato host (vedi qemu.build_cmd console_sock).
+_CONSOLE = ("(while true; do /firmadyne/busybox setsid /firmadyne/busybox sh "
+            "</dev/ttyS1 >/dev/ttyS1 2>&1; /firmadyne/busybox sleep 2; done) &\n")
 
 # Bring-up ROBUSTO della NIC primaria: non dipende da brctl/env/timing di network.sh.
 # Ri-asserisce l'IP ogni 5s per ~2min (il firmware può resettare l'iface), poi smette.
@@ -77,7 +84,7 @@ LAUNCHER_REL = "firmadyne/sae_init.sh"
 LAUNCHER_INIT = "/firmadyne/sae_init.sh"
 
 
-def _write_launcher(rootfs: Path, real_init: str, bringup: str) -> None:
+def _write_launcher(rootfs: Path, real_init: str, bringup: str, console: str = "") -> None:
     """Scrive il wrapper di init che avvia l'harness e poi exec-a l'init vero del firmware.
 
     real_init deve restare vivo come PID1 (busybox init: reap + respawn getty). Se il
@@ -86,7 +93,7 @@ def _write_launcher(rootfs: Path, real_init: str, bringup: str) -> None:
     senza init persistente.
     """
     f = rootfs / LAUNCHER_REL
-    f.write_text(_LAUNCHER.format(bringup=bringup, real_init=real_init))
+    f.write_text(_LAUNCHER.format(bringup=bringup, real_init=real_init, console=console))
     f.chmod(0o755)
 
 
@@ -125,7 +132,7 @@ def _write_runtime(rootfs: Path, det: Detected, network_type: NetworkType,
     # init vero da eseguire come PID1 dopo aver avviato l'harness. Preferiamo /sbin/init
     # (busybox init: resta vivo, reap + respawn getty); altrimenti lo script rcS rilevato.
     real_init = "/sbin/init" if (rootfs / "sbin/init").exists() else (det.init or "/bin/sh")
-    _write_launcher(rootfs, real_init, bringup)
+    _write_launcher(rootfs, real_init, bringup, console=_CONSOLE if shell else "")
 
 
 # righe di rete che ci interessano nel serial log: quando smettono di crescere,
@@ -250,8 +257,9 @@ def _serve(cfg: Config, arch: str, img, plan: NetPlan, qemu_init: str,
     """Tiene l'emulazione viva finché l'utente non interrompe (Ctrl-C)."""
     import time
     from .qemu import host_fwd_map, COMMON_TCP_PORTS
+    console_sock = serial_log.parent / "console.sock"
     cmd = build_cmd(cfg, arch, img, serial_log, plan, qemu_init,
-                    user_net=(tap is None), tap_name=tap)
+                    user_net=(tap is None), tap_name=tap, console_sock=console_sock)
 
     def _endpoint(guest: int, host_addr: str, host_port: int) -> str:
         label = {21: "ftp", 23: "telnet", 22: "ssh", 7547: "tr069",
@@ -279,7 +287,10 @@ def _serve(cfg: Config, arch: str, img, plan: NetPlan, qemu_init: str,
         print(f"    host {'sul tap ' + tap if tap else 'via user-net'} → guest {ip}")
         for u in lines:
             print(f"      {u}")
-        print(f"    >>> SHELL:  {shell_cmd}   (root, senza login)")
+        print(f"    >>> SHELL (rete):    {shell_cmd}   (root, senza login)")
+        print(f"    >>> SHELL (seriale): socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:{console_sock}")
+        print("        (console di root su ttyS1, indipendente dal firmware e dalla rete;")
+        print("         alternativa senza socat: nc -U " + str(console_sock) + "  —  esci con Ctrl-] )")
         print("    (porte inferite + comuni; i servizi avviati a runtime sono già mappati)")
         print("    Ctrl-C per fermare.")
         try:

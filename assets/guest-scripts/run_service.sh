@@ -5,7 +5,9 @@ BINARY=`${BUSYBOX} cat /firmadyne/service`
 BINARY_NAME=`${BUSYBOX} basename ${BINARY}`
 
 if (${FIRMAE_ETC}); then
-  ${BUSYBOX} sleep 120
+  # attesa di assestamento prima di forzare il servizio web. 120s erano eterni su
+  # MIPS emulato (minuti wall-clock). Default 30s; override via cmdline: SERVICE_DELAY=N
+  ${BUSYBOX} sleep ${SERVICE_DELAY:-30}
   $BINARY &
 
   while (true); do

@@ -78,7 +78,7 @@ def _qemu_netdevs(arch: str, plan: NetPlan, tap_prefix: str, user_net: bool = Fa
 def build_cmd(cfg: Config, arch: str, image: Path, serial_log: Path,
               plan: NetPlan, qemu_init: str, *, debug: bool = False,
               monitor_sock: Path | None = None, user_net: bool = False,
-              tap_name: str | None = None) -> list[str]:
+              tap_name: str | None = None, console_sock: Path | None = None) -> list[str]:
     spec = ARCH_TABLE[arch]
     endian_kernel = cfg.kernel_path(arch, debug=debug)
     tap_prefix = f"tap{serial_log.parent.name}"
@@ -92,8 +92,13 @@ def build_cmd(cfg: Config, arch: str, image: Path, serial_log: Path,
               f"{qemu_init} rw debug ignore_loglevel print-fatal-signals=1 "
               "FIRMAE_NET=true FIRMAE_NVRAM=true FIRMAE_KERNEL=true FIRMAE_ETC=true "
               f"firmadyne.syscall={'32' if debug else '1'} user_debug={'31' if debug else '0'}")
+    # -serial #1 = ttyS0 (console kernel + serial log). #2 = ttyS1 su socket unix lato
+    # host = console di root indipendente dal firmware (vedi _CONSOLE nel launcher).
+    serial = ["-serial", f"file:{serial_log}"]
+    if console_sock:
+        serial += ["-serial", f"unix:{console_sock},server,nowait"]
     cmd = [spec.qemu, "-m", "256", "-M", spec.machine, "-kernel", str(endian_kernel),
-           *disk, "-append", append, "-serial", f"file:{serial_log}",
+           *disk, "-append", append, *serial,
            "-display", "none", *_qemu_netdevs(arch, plan, tap_prefix, user_net, tap_name)]
     if monitor_sock:
         cmd += ["-monitor", f"unix:{monitor_sock},server,nowait"]
