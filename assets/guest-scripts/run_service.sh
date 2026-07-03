@@ -16,12 +16,22 @@ if (${FIRMAE_ETC}); then
   # UI si vede (il backend dinamico resta monco). Se il daemon vero sale, il bind qui
   # fallisce e basta. ponytail: porta fissa 80, docroot da /firmadyne/web_static.
   WEB=`${BUSYBOX} cat /firmadyne/web_static 2>/dev/null`
-  if [ -n "$WEB" ] && [ -d "$WEB" ]; then
-    ( ${BUSYBOX} sleep `${BUSYBOX} expr ${SERVICE_DELAY:-30} + 20`
-      if ( ! (${BUSYBOX} netstat -ltn 2>/dev/null | ${BUSYBOX} grep -qE ':80[^0-9]') ); then
-          ${BUSYBOX} httpd -p 80 -h "$WEB"
-      fi ) &
-  fi
+  ( ${BUSYBOX} sleep `${BUSYBOX} expr ${SERVICE_DELAY:-30} + 20`
+    # bypass switch: se la :80 non è ancora su, impersoniamo cos e mandiamo il trigger
+    # ServiceCfg (0x7ee) a httpd /var/tmp/8, così il backend VERO bind-a. Il .so ha un
+    # costruttore che spara il datagramma: basta caricarlo in un processo qualsiasi.
+    if ( ! (${BUSYBOX} netstat -ltn 2>/dev/null | ${BUSYBOX} grep -qE ':80[^0-9]') ); then
+        if [ -f /firmadyne/httpd_trigger.so ]; then
+            LD_PRELOAD=/firmadyne/httpd_trigger.so ${BUSYBOX} true
+            ${BUSYBOX} sleep 3
+        fi
+    fi
+    # fallback GUI statica: se dopo il trigger nessuno ascolta sulla :80 e ci sono asset,
+    # serviamo il frontend col busybox (backend monco). Se l'httpd vero è su, il bind fallisce.
+    if [ -n "$WEB" ] && [ -d "$WEB" ] && \
+       ( ! (${BUSYBOX} netstat -ltn 2>/dev/null | ${BUSYBOX} grep -qE ':80[^0-9]') ); then
+        ${BUSYBOX} httpd -p 80 -h "$WEB"
+    fi ) &
 
   while (true); do
       ${BUSYBOX} sleep 10

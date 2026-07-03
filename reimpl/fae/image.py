@@ -83,6 +83,13 @@ def install_firmadyne(cfg: Config, root: Path, arch: str) -> None:
     (fd / "libnvram").mkdir(exist_ok=True)
     (fd / "libnvram.override").mkdir(exist_ok=True)
     _install_ioctl_stub(cfg, root, arch)
+    # bypass del gate switch: shim che invia il trigger RDP ServiceCfg (0x7ee) a httpd
+    # /var/tmp/8 (vedi assets/sources/httpd_trigger). Solo copia: lo carica run_service.sh
+    # via LD_PRELOAD quando serve. No-op finché il .so non è compilato per l'arch.
+    trig = cfg.binaries / f"httpd_trigger.{arch}.so"
+    if trig.exists():
+        shutil.copy2(trig, fd / "httpd_trigger.so")   # nome fisso: lo script non deve sapere l'arch
+        (fd / "httpd_trigger.so").chmod(0o755)
     dbg = fd / "debug.sh"
     dbg.write_text("#!/firmadyne/sh\n")
     dbg.chmod(0o755)
