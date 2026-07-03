@@ -36,6 +36,16 @@ editare la root
   # A RUNTIME (vivo): shell root nel guest, modifica, poi `sync` PRIMA di Ctrl-C
   ./sae run firmwares/mod10.bin --keep-alive
   telnet 127.0.0.1 51338     # (porta shell mostrata all'avvio) → modifichi → `sync`
+
+shell di root (con --keep-alive)
+--------------------------------
+  # via RETE (telnetd): richiede la rete del guest su
+  telnet 127.0.0.1 51338                 # user-net   (o: telnet <ip-guest> 31338 con --tap)
+
+  # via SERIALE (ttyS1): SEMPRE disponibile, indipendente da firmware e rete
+  #   funziona anche se il firmware si incastra o non alza la rete
+  socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:scratch/mod10/console.sock
+  nc -U scratch/mod10/console.sock       # alternativa senza socat (esci con Ctrl-])
 """
 
 

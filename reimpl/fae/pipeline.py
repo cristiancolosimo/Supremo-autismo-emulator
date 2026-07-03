@@ -40,12 +40,32 @@ class Detected:
     init: str | None
     service: str | None
     service_name: str | None
+    web_static: str | None = None   # docroot degli asset UI statici (fallback GUI)
+
+
+def _find_web_root(rootfs: Path) -> str | None:
+    """Docroot degli asset web statici del firmware, da servire col busybox quando il
+    web daemon dinamico (dipendente da SoC/config, es. cos su MediaTek) non sale: così
+    la GUI si vede comunque. Preferisce una dir con nome noto; altrimenti quella con più
+    pagine .htm(l). ponytail: euristica sul conteggio pagine, ok per i firmware attuali."""
+    for name in ("web", "www", "htdocs", "html", "home_page", "webpages"):
+        d = rootfs / name
+        if d.is_dir() and any(d.rglob("*.htm*")):
+            return f"/{name}"
+    best, best_n = None, 0
+    for d in rootfs.iterdir():
+        if d.is_dir():
+            n = sum(1 for p in d.rglob("*.htm*") if p.is_file())
+            if n > best_n:
+                best, best_n = d, n
+    return f"/{best.name}" if best and best_n >= 3 else None
 
 
 def _infer_files(rootfs: Path) -> Detected:
     init = next((f"/{c}" for c in _INIT_CANDIDATES if (rootfs / c).exists()), None)
     svc = next(((cmd, name) for p, cmd, name in _WEB_SERVICES if (rootfs / p).exists()), None)
-    return Detected(init, svc[0] if svc else None, svc[1] if svc else None)
+    return Detected(init, svc[0] if svc else None, svc[1] if svc else None,
+                    _find_web_root(rootfs))
 
 
 # Wrapper di init lanciato dal KERNEL via `init=/firmadyne/sae_init.sh`. Gira col nostro
@@ -59,11 +79,31 @@ $BB mount -t proc proc /proc 2>/dev/null
 $BB mount -t sysfs sysfs /sys 2>/dev/null
 $BB mkdir -p /dev/pts
 $BB mount -t devpts devpts /dev/pts 2>/dev/null
-{console}{bringup}/firmadyne/network.sh &
+{ipt}{console}{bringup}/firmadyne/network.sh &
 /firmadyne/run_service.sh &
 /firmadyne/debug.sh &
 exec {real_init}
 """
+
+# Neutralizza iptables/ip6tables/ebtables PRIMA dell'init del firmware. I kernel
+# istrumentati (malta) non hanno i moduli netfilter (nat/filter/mangle): ogni regola
+# fallisce con "Table does not exist" e i demoni di rete che le programmano al boot
+# (es. `cos` su MediaTek/Ralink) trattano l'errore come fatale e non avviano i servizi.
+# Il wrapper CHIAMA il binario reale (se netfilter c'e', le regole si applicano davvero:
+# nessuna regressione) ma forza exit 0 e silenzia lo stderr, così lo script chiamante
+# prosegue. Agnostico all'arch (shell puro), idempotente (salta se già wrappato).
+# ponytail: euristica "il boot-firewall non è emulabile → non deve bloccare il boot";
+# se un firmware legge l'OUTPUT di iptables per prendere decisioni, lì servirebbe di più.
+_IPTABLES_STUB = (
+    "for _d in /sbin /usr/sbin /bin /usr/bin; do "
+    "for _t in iptables ip6tables ebtables arptables "
+    "iptables-restore ip6tables-restore; do _f=$_d/$_t; "
+    "if [ -f \"$_f\" ] && [ ! -e \"$_f.sae_real\" ]; then "
+    "$BB mv \"$_f\" \"$_f.sae_real\" && "
+    "$BB printf '#!/firmadyne/sh\\n\"%s.sae_real\" \"$@\" 2>/dev/null\\nexit 0\\n' "
+    "\"$_f\" > \"$_f\" && $BB chmod 755 \"$_f\"; "
+    "fi; done; done\n"
+)
 
 # Console di root su ttyS1, avviata dal launcher PRIMA dell'init del firmware: shell
 # indipendente dalla rete e dallo stato del firmware (funziona anche se l'init si incastra).
@@ -93,7 +133,8 @@ def _write_launcher(rootfs: Path, real_init: str, bringup: str, console: str = "
     senza init persistente.
     """
     f = rootfs / LAUNCHER_REL
-    f.write_text(_LAUNCHER.format(bringup=bringup, real_init=real_init, console=console))
+    f.write_text(_LAUNCHER.format(bringup=bringup, real_init=real_init, console=console,
+                                  ipt=_IPTABLES_STUB))
     f.chmod(0o755)
 
 
@@ -110,6 +151,9 @@ def _write_runtime(rootfs: Path, det: Detected, network_type: NetworkType,
     if det.service:
         (fd / "service").write_text(det.service)
         (fd / "service_name").write_text(det.service_name or "")
+    # docroot statico per il fallback GUI (run_service.sh lo serve col busybox se il
+    # web daemon dinamico non alza la porta) — vuoto se non trovato
+    (fd / "web_static").write_text(det.web_static or "")
     # shell di debug: telnetd (busybox lo ha; nc -e no) su SHELL_PORT, nessun login.
     dbg = fd / "debug.sh"
     if shell:

@@ -20,6 +20,13 @@ from .config import Config
 DEVICE_NODES = [
     ("/dev/console", "c", 5, 1),
     ("/dev/null", "c", 1, 3),
+    ("/dev/zero", "c", 1, 5),
+    ("/dev/full", "c", 1, 7),
+    # random/urandom: senza questi ogni daemon con crypto (httpd SSL, dropbear, ...)
+    # fallisce l'init RNG (OpenSSL RAND_poll) ed esce; frequente su firmware MediaTek.
+    ("/dev/random", "c", 1, 8),
+    ("/dev/urandom", "c", 1, 9),
+    ("/dev/tty", "c", 5, 0),
     ("/dev/ptmx", "c", 5, 2),      # Unix98 pty master: serve a telnetd (shell di debug)
     ("/dev/ttyS1", "c", 4, 65),
     *[(f"/dev/mtd{i}", "c", 90, i * 2) for i in range(11)],
@@ -75,9 +82,35 @@ def install_firmadyne(cfg: Config, root: Path, arch: str) -> None:
         (fd / f).touch()
     (fd / "libnvram").mkdir(exist_ok=True)
     (fd / "libnvram.override").mkdir(exist_ok=True)
+    _install_ioctl_stub(cfg, root, arch)
     dbg = fd / "debug.sh"
     dbg.write_text("#!/firmadyne/sh\n")
     dbg.chmod(0o755)
+
+
+def _install_ioctl_stub(cfg: Config, root: Path, arch: str) -> None:
+    """Preload dello shim ioctl (se compilato per quest'arch): fa ritornare 0 gli ioctl
+    che falliscono perché l'hardware non è emulato (switch/MII/GPIO su SoC MediaTek/Ralink),
+    così i demoni che ci programmano sopra non restano in loop (es. `cos` che spamma
+    "swReg: Operation not supported"). Durevole: sopravvive a --rebuild (era un edit manuale).
+
+    Solo se assets/binaries/ioctl_stub.<arch>.so esiste → auto per mipsel, no-op altrove
+    (per altre arch: ricompila lo shim, vedi assets/sources/ioctl_stub/). Append idempotente
+    a /etc/ld.so.preload (non sovrascrive un eventuale preload del vendor).
+    """
+    stub = cfg.binaries / f"ioctl_stub.{arch}.so"
+    if not stub.exists():
+        return
+    dst = root / "firmadyne" / stub.name
+    shutil.copy2(stub, dst)
+    dst.chmod(0o755)
+    guest_path = f"/firmadyne/{stub.name}"
+    preload = root / "etc" / "ld.so.preload"
+    preload.parent.mkdir(parents=True, exist_ok=True)
+    lines = preload.read_text().splitlines() if preload.exists() else []
+    if guest_path not in lines:
+        lines.append(guest_path)
+        preload.write_text("\n".join(lines) + "\n")
 
 
 def prepare(cfg: Config, rootfs: Path, arch: str) -> None:

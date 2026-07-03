@@ -42,6 +42,7 @@ arch=mipseb network=default ip=192.168.0.1 web=OK
 - [Cache e artefatti](#cache-e-artefatti)
 - [Output ed exit code](#output-ed-exit-code)
 - [Troubleshooting](#troubleshooting)
+  - [SoC MediaTek/Ralink](#soc-mediatekralink-switch-hw-netfilter)
 - [Struttura del progetto](#struttura-del-progetto)
 - [Contesto e analisi](#contesto-e-analisi)
 
@@ -205,6 +206,23 @@ telnet 127.0.0.1 51338               # shell root nel guest (senza login)
 > Limite: funziona se il servizio ascolta su `0.0.0.0`. Alcuni firmware bindano solo
 > sull'IP LAN specifico — in quel caso usa il TAP.
 
+### Shell di root
+
+Con `--keep-alive` sono disponibili **due** shell root senza login:
+
+```bash
+# via RETE (telnetd) — richiede che la rete del guest sia su
+telnet 127.0.0.1 51338                 # user-net   (con --tap: telnet <ip-guest> 31338)
+
+# via SERIALE (ttyS1) — SEMPRE disponibile, indipendente da firmware e rete
+socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:scratch/<slug>/console.sock
+nc -U scratch/<slug>/console.sock      # alternativa (esci con Ctrl-])
+```
+
+La console **seriale** è avviata dal launcher *prima* dell'init del firmware e non usa la
+rete: resta raggiungibile anche se il firmware si incastra, panica o non alza mai
+l'interfaccia. È la via di recovery quando la telnet di rete non risponde.
+
 ### TAP (IP statico, richiede root una volta)
 
 Raggiungi il guest direttamente sul suo IP LAN. Il TAP si crea una volta (rootless per
@@ -270,6 +288,7 @@ senza estensione:
 | `qemu.initial.serial.log` | serial log del boot d'inferenza (ri-parsabile offline) |
 | `qemu.final.serial.log` | serial log del boot di verify |
 | `qemu.stderr.log` | stderr di QEMU (diagnostica) |
+| `console.sock` | socket della console seriale di root (solo con `--keep-alive`) |
 | `state.json` | `RunState` serializzato (arch, init, servizio, piano di rete, web) |
 
 **Caching intelligente:** i run successivi riusano `extract/` e il serial log
@@ -316,8 +335,81 @@ arch=mipseb network=default ip=192.168.0.1 web=OK
 | `/dev/null` mancante, getty fallisce | device node non linkati | i node sono iniettati via `debugfs`; ispeziona con `debugfs -R "ls -l /dev" scratch/<slug>/image.ext2` |
 | `network_type=default`, nessun IP | il firmware non assegna IP a `eth0` da solo | atteso su molti device; `network.sh` mette `br0=192.168.0.1` al verify boot |
 | web non risponde in user-net | il servizio binda solo sull'IP LAN | usa `--tap` (vedi §Rete) |
+| telnet di rete irraggiungibile | firmware incastrato / rete non su | usa la console **seriale** (`console.sock`, vedi §Shell di root) |
+| log pieno di `swReg: Operation not supported` | SoC MediaTek/Ralink: il demone (`cos`) programma lo switch HW assente | gestito: lo shim `ioctl` (LD_PRELOAD) fa ritornare 0 quegli ioctl — vedi §SoC MediaTek/Ralink |
+| `iptables ... Table does not exist` a ripetizione | kernel emulato senza moduli netfilter (nat/filter) | gestito: `iptables`/`ip6tables`/`ebtables` sono wrappati per non abortire il boot — vedi §SoC MediaTek/Ralink |
+| web=FAIL su device MediaTek/Ralink pur senza spam | `httpd` dipende da `cos` che resta parzialmente bloccato | ceiling noto (come FirmAE): shell root disponibile, UI vendor no — vedi §SoC MediaTek/Ralink |
 | QEMU esce da solo con `--tap` | TAP inesistente o non di tua proprietà | `sudo ./setup-tap.sh sae0`; controlla `qemu.stderr.log` |
 | modifiche runtime perse | shutdown senza sync | `sync` nella shell del guest prima di Ctrl-C |
+
+### SoC MediaTek/Ralink (switch HW, netfilter)
+
+I device basati su SoC MediaTek/Ralink (es. TP-Link con MT7628) sono **noto-difficili** da
+emulare: l'init del firmware avvia un demone di gestione (tipicamente `cos`, via `libcmm.so`)
+che programma **hardware assente** su QEMU malta. Sintomi ricorrenti, tutti gestiti
+automaticamente dalla pipeline:
+
+- **Switch/MII/GPIO non emulati** → migliaia di `swReg: Operation not supported`, `cos` in
+  loop di init, servizi mai avviati. **Rimedio automatico:** uno shim in `LD_PRELOAD`
+  (`/etc/ld.so.preload`) che intercetta gli `ioctl` falliti per hardware assente
+  (`EOPNOTSUPP`/`ENODEV`/`ENXIO`) e ritorna 0, così il demone prosegue. Chiama sempre l'ioctl
+  reale: dove l'hardware c'è, nessun effetto. Attivo se esiste
+  `assets/binaries/ioctl_stub.<arch>.so` (oggi: `mipsel`; per altre arch ricompila lo shim,
+  sorgente in `assets/sources/ioctl_stub/`).
+
+- **`/dev/cmem` assente** (allocatore di memoria contigua del SoC) → `cmem_initSharedBuff` /
+  `cos_init` falliscono con *"Init big shared buffer error"*. **Rimedio automatico:** lo stesso
+  shim intercetta `open`/`open64` di `/dev/cmem` e ritorna un fd `memfd` da 16 MB, così `cos`
+  supera l'init della shared buffer.
+
+- **Netfilter assente** → `iptables ... Table does not exist (do you need to insmod?)` a
+  ripetizione, e il boot-firewall che aborta l'init. **Rimedio automatico:** all'avvio
+  `iptables`/`ip6tables`/`ebtables`/`arptables` (e i `*-restore`) vengono wrappati con uno
+  stub shell (agnostico all'arch, nessuna compilazione) che **chiama il binario reale** ma
+  forza `exit 0` e silenzia lo stderr. Dove netfilter è presente le regole si applicano
+  davvero: nessuna regressione.
+
+- **Web daemon legato a `cos`** → su questi device `httpd` prende porte e docroot da `cos`
+  via IPC (Unix socket); se `cos` non completa, `httpd` esce subito e la :80 non binda mai.
+  **Rimedio automatico (fallback GUI statica):** se dopo l'attesa nessuno ascolta sulla :80 e
+  il firmware ha asset web statici, la pipeline li serve con `busybox httpd -p 80 -h <docroot>`
+  (docroot rilevata da `_find_web_root`, scritta in `/firmadyne/web_static`). La **UI si vede**
+  (`http://<ip>/`, HTTP 200); il backend dinamico resta monco. Se l'httpd vero sale, il bind
+  del fallback fallisce e basta.
+
+**Ceiling — perché la GUI *dinamica* non parte (diagnosi completa).** Analisi fatta su
+`modem_tplink` (in realtà un **Archer C50 v4**, MT7628) tracciando `cos` sotto strace e
+disassemblando `libcmm.so` (capstone). Catena accertata:
+
+1. `httpd` è **message-driven**: all'avvio attacca la shared-memory SysV del data-model RDP
+   (key `0x4d2`), legge `HTTP_CFG_OBJ` — che è **corretto** (`HttpLocalEnabled=1`,
+   `HttpLocalPort=80`) — poi entra in `http_inetd_main` e **aggiunge i listener solo quando
+   riceve un messaggio** su `/var/tmp/8` (il suo socket AF_UNIX DGRAM; module id fisso = 8).
+2. Il trigger è `ServiceCfg` (msgType `0x7ee`, payload 520 B) inviato da `cos` via
+   `libcmm.so::rsl_initHttpdObj`/`rsl_sendHttpdServiceCfg`.
+3. **`cos` non chiama mai `rsl_initHttpdObj`**: notifica altri moduli (`/var/tmp/6,7,19,21…`)
+   ma **mai il modulo 8**. Il suo stadio "web/http init" è gated dietro la readiness dello
+   switch, servita dal driver kernel **`raeth.ko`** (Ralink) che crea `/proc/tplink/*` e i
+   registri `swReg`. Su QEMU malta (NIC e1000, kernel firmadyne) `raeth.ko` non c'è →
+   `swRegRead: Operation not supported` a ripetizione → l'hardware-init non completa → niente
+   trigger a `httpd`.
+
+Sbloccarlo davvero = **emulare il driver switch `raeth.ko`** (interfaccia `/proc/tplink` +
+semantica registri + eventi netlink), oppure sintetizzare a mano il datagram `0x7ee` con la
+struct-porte corretta. Entrambe sono giorni di RE su binario PIC stripped, esito incerto, e
+comunque le pagine che *scrivono* config resterebbero monche senza il vero `cos`. È il
+confine fondamentale di FirmAE su MediaTek/Ralink: firmware SoC-specifico su hardware emulato
+generico. Il **fix dei device node `/dev/{urandom,random,zero,…}`** (`image.py`,
+`DEVICE_NODES`) fa comunque avanzare `httpd` oltre l'init crypto (OpenSSL `RAND_poll`) fino
+allo stadio config-wait, e vale per ogni firmware con daemon SSL — senza di esso qualunque
+web daemon con TLS esce prima ancora di arrivare all'IPC.
+
+Resta disponibile la **shell di root** (rete + seriale, vedi §Shell di root) per ispezione.
+
+> **Verificato** su `modem_tplink` (TP-Link MT7628): con `--tap` l'host raggiunge la GUI
+> statica su `http://192.168.0.1/index.htm` (HTTP 200). L'host `.2` arriva al guest `.1` via
+> `eth0` untagged, quindi **non serve** una sub-interface VLAN lato host anche se la LAN del
+> guest è bridgiata su `eth0.3/.4/.5/.6`.
 
 Ispezione dell'immagine senza montarla:
 
