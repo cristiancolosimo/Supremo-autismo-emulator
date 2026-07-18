@@ -14,6 +14,10 @@ declare -A DEPS=(
   [python3]="python3 python  orchestratore (>=3.11)"
   [ip]="iproute iproute2  crea/gestisce il TAP (setup-tap.sh)"
   [binwalk]="—(cargo) —(cargo)  estrae il firmware (cargo install binwalk, OBBLIGATORIA v3)"
+  [mksquashfs]="squashfs-tools squashfs-tools  ricrea il rootfs squashfs (fmk build)"
+  [unsquashfs]="squashfs-tools squashfs-tools  legge il superblock squashfs (fmk extract)"
+  [sasquatch]="—(src) —(src)  scompatta squashfs lzma legacy (fmk extract, github.com/devttys0/sasquatch)"
+  [flashrom]="flashrom flashrom  legge/scrive il chip SPI via SOIC-8 (dump e flash reale, opz.)"
   [telnet]="telnet inetutils  client per la shell di debug (--keep-alive)"
   [curl]="curl curl  test manuale del web"
 )

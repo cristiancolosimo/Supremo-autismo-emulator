@@ -211,8 +211,19 @@ def _wait_until_settled(q: QemuProcess, log: Path, cap: int,
 
 
 def _fingerprint(firmware: Path) -> str:
-    """sha256 corto del contenuto del firmware: chiave di cache content-based."""
+    """sha256 corto del contenuto: chiave di cache content-based.
+
+    Per una dir rootfs già spacchettata: hash dell'albero (path,size,mtime) →
+    invalida la cache quando editi i file. Per un .bin: hash del contenuto.
+    """
     import hashlib
+    if firmware.is_dir():
+        h = hashlib.sha256()
+        for p in sorted(firmware.rglob("*")):
+            st = p.lstat()
+            h.update(f"{p.relative_to(firmware)}|{st.st_size}|{int(st.st_mtime)}\n"
+                     .encode())
+        return h.hexdigest()[:16]
     return hashlib.sha256(firmware.read_bytes()).hexdigest()[:16]
 
 
@@ -234,8 +245,18 @@ def run(cfg: Config, firmware: Path, brand: str = "auto", iid: int = 1,
     work.mkdir(parents=True, exist_ok=True)
     fpfile.write_text(fp)
 
-    rootfs = extract.extract(cfg, firmware, iid)
-    print(f"[*] rootfs:   {rootfs}")
+    if firmware.is_dir():
+        # rootfs già spacchettato (es. da `sae extract`) e magari modificato:
+        # emula una COPIA in scratch, così la dir originale resta pulita per
+        # `sae build`/flash (niente /firmadyne o iptables-stub iniettati nel .bin).
+        src = extract._find_rootfs(firmware)
+        rootfs = work / "rootfs"
+        if not rootfs.exists():
+            shutil.copytree(src, rootfs, symlinks=True, ignore_dangling_symlinks=True)
+        print(f"[*] rootfs:   {rootfs}  (copia di {src}, originale intatto per build/flash)")
+    else:
+        rootfs = extract.extract(cfg, firmware, iid)
+        print(f"[*] rootfs:   {rootfs}")
     arch = archmod.detect(rootfs)
     endian = "eb" if arch.endswith("eb") else "el"
     print(f"[*] arch:     {arch} ({endian})")

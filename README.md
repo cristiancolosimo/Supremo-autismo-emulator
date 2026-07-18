@@ -5,6 +5,12 @@ l'architettura, costruisce un'immagine di disco avviabile **senza root**, boota 
 kernel istrumentato, **inferisce la configurazione di rete** leggendo il serial log e
 **verifica che l'interfaccia web del dispositivo risponda**.
 
+Include anche un toolkit di **analisi firmware a tutto tondo** (`extract`/`build`/`info`,
+modulo `fmk.py`, sostituto stdlib-only di firmware-mod-kit): spacchetta il firmware in
+partizioni ispezionabili, ti fa modificare il rootfs, ricompone un `.bin` con **checksum
+vendor validi** (TP-Link/uImage/TRX/DLOB) pronto per la **riscrittura full-chip via SOIC-8**,
+e ti permette di **emulare direttamente il rootfs modificato** senza ripack.
+
 È una reimplementazione pulita e tipizzata di [FirmAE](https://github.com/pr0v3rbs/FirmAE)
 (KAIST, ACSAC 2020): stesse tecniche di arbitration e gli stessi binari istrumentati, ma
 orchestrazione in un solo linguaggio (Python 3.11+), senza mount/loop-device, senza
@@ -36,6 +42,7 @@ arch=mipseb network=default ip=192.168.0.1 web=OK
 - [Requisiti](#requisiti)
 - [Installazione](#installazione)
 - [Quickstart](#quickstart)
+- [Analisi firmware: unpack → modifica → emula/flash](#analisi-firmware-unpack--modifica--emulaflash)
 - [Comandi e opzioni](#comandi-e-opzioni)
 - [Rete: rootless vs TAP](#rete-rootless-vs-tap)
 - [Editare il filesystem del guest](#editare-il-filesystem-del-guest)
@@ -88,6 +95,9 @@ crescere: niente attesa a timeout fisso.
 | `mke2fs`, `debugfs` | `e2fsprogs` | build immagine ext2 senza root |
 | `file` | `file` | rileva architettura/endianness |
 | `binwalk` **v3** | `cargo install binwalk` | estrazione firmware (obbligatoria la v3 Rust) |
+| `mksquashfs`, `unsquashfs` | `squashfs-tools` | ricompone/legge il rootfs squashfs (`build`/`extract`) |
+| `sasquatch` | da sorgente ([devttys0/sasquatch](https://github.com/devttys0/sasquatch)) | scompatta squashfs LZMA legacy (`extract`) |
+| `flashrom` | `flashrom` | legge/scrive il chip SPI via SOIC-8 (dump e flash reale, opz.) |
 | `ip` | `iproute` / `iproute2` | solo per il TAP (`setup-tap.sh`) |
 | `telnet` | `telnet` / `inetutils` | shell di debug (`--keep-alive`) |
 | `curl` | `curl` | test manuale del web |
@@ -138,17 +148,129 @@ Aiuto ed esempi sempre a portata di mano:
 
 ---
 
-## Comandi e opzioni
+## Analisi firmware: unpack → modifica → emula/flash
 
-Sottocomando unico: **`run`**.
+Oltre all'emulazione, `sae` fa da **firmware-mod-kit moderno** (modulo `reimpl/fae/fmk.py`,
+solo stdlib + `binwalk`/`sasquatch`/`mksquashfs`). Tre sottocomandi:
+
+| Comando | Cosa fa |
+|---|---|
+| `./sae info <fw>` | scan+parse: stampa il **layout** del firmware in JSON (partizioni, offset, tipo fs, compressione, coda ART) senza estrarre nulla |
+| `./sae extract <fw> -o <dir>` | spacchetta in `<dir>/`: `header.bin`, `rootfs/` (editabile), `tail.bin`, `config.json`, e `parts/` (ogni partizione dumpata per l'analisi) |
+| `./sae build <dir> -o <out.bin>` | ricompone `<dir>` in un `.bin` flashabile: rifà lo squashfs, **ripara i checksum vendor**, preserva byte-identico tutto tranne il rootfs |
+
+### Modello di layout
+
+Un firmware di router è `[bootloader][header vendor][kernel][rootfs][padding][coda]`.
+`sae` taglia in tre pezzi e ne preserva la struttura:
 
 ```
-./sae run <firmware> [opzioni]
+offset 0 ───────────────────────────────────────────────────────── EOF
+│ u-boot │ tplink-hdr │ kernel │   SquashFS rootfs   │ pad 0xFF │ ART/config │
+└──────────── header.bin ──────────────┘└─── rootfs/ ───┘          └─ tail.bin ┘
+         (preservato verbatim)          (editabile)         (preservato verbatim)
+```
+
+- **`header.bin`** — tutto prima del rootfs (bootloader + header vendor + kernel): riscritto
+  identico, i suoi checksum si riparano al build.
+- **`rootfs/`** — il filesystem che modifichi (file normali di tua proprietà).
+- **`tail.bin`** — la coda a fine flash: **ART/caldata radio** (calibrazione wifi, unica per
+  device), config, u-boot-env. Su un dump full-chip **va preservata byte-identica o brick**.
+  Rilevata automaticamente (blocco erase da 64 KB allineato); override con `--tail-offset`.
+
+### Tutorial A — modifica ed **emula** (senza toccare hardware)
+
+Il modo più rapido per testare una modifica: spacchetta, edita, emula direttamente il rootfs.
+
+```bash
+./sae info firmwares/mod10.bin           # 1. guarda il layout (partizioni, offset, ART)
+./sae extract firmwares/mod10.bin -o work # 2. spacchetta in work/
+
+vim work/rootfs/etc/passwd                # 3. modifica quello che vuoi
+echo 'root::0:0:root:/:/bin/sh' > work/rootfs/etc/passwd   # es. togli la password di root
+
+./sae run work                            # 4. EMULA il rootfs modificato (niente ripack!)
+```
+
+`./sae run` accetta sia un `.bin` sia una **directory** già spacchettata. Con una dir salta
+binwalk ed emula una **copia** in `scratch/` — la tua `work/rootfs/` resta pulita per il flash.
+Il ciclo edita→`run` non richiede alcun `build`.
+
+### Tutorial B — riscrittura **full-chip via SOIC-8**
+
+Per modificare il firmware sul silicio reale (clip SOIC-8 + programmatore, es. CH341A):
+
+```bash
+# 1. DUMP del chip SPI (l'immagine intera del flash, non un .bin OTA)
+flashrom -p ch341a_spi -r dump.bin
+flashrom -p ch341a_spi -r dump2.bin && cmp dump.bin dump2.bin   # ⚠️ verifica: due letture identiche
+
+# 2. spacchetta. Se conosci la mtd layout (da /proc/mtd del device), fissa la coda ART:
+./sae extract dump.bin -o work --tail-offset 0x3f0000
+#   senza --tail-offset prova a rilevarla da sola; controlla `tail_offset` in work/config.json
+
+# 3. modifica il rootfs
+vim work/rootfs/etc/...
+
+# 4. (consigliato) emula prima di rischiare il flash
+./sae run work
+
+# 5. ricomponi il .bin full-chip (stessa dimensione del chip, ART preservato, checksum riparati)
+./sae build work -o new.bin
+
+# 6. riscrivi il chip
+flashrom -p ch341a_spi -w new.bin
+```
+
+> **⚠️ Anti-brick.** `build` rifiuta l'output se il nuovo rootfs sfora lo slot disponibile
+> (sovrascriverebbe l'ART) e ti dice lo slack esatto. Preserva sempre `tail.bin` verbatim.
+> Attenzione però: mksquashfs può comprimere **~1% peggio** del tool del vendor, quindi su un
+> rootfs quasi pieno potresti dover **rimuovere qualcosa** prima di aggiungere file. Se
+> `--tail-offset` è sbagliato, l'ART si corrompe → tieni sempre il `dump.bin` originale.
+
+### Checksum vendor riparati automaticamente al `build`
+
+Portati in Python da `analisi-fmk/reference/` e verificati byte-a-byte:
+
+| Tipo | Cosa ricalcola |
+|---|---|
+| **TP-Link** | MD5 "salato" con chiave fissa (normale/bootloader) su tutta l'immagine |
+| **uImage** | `ih_dcrc` (CRC32 dati) + `ih_hcrc` (CRC32 header), big-endian |
+| **TRX** | CRC32 da offset +12 (Broadcom/OpenWrt) |
+| **DLOB** | MD5 D-Link su blocco dati annidato |
+
+Self-test completo (gira su `analisi-fmk/mod10.bin`, incluso un caso full-chip con ART):
+
+```bash
+cd reimpl && python3 -m fae.fmk --selftest      # 12 assert, stampa PASS/FAIL
+```
+
+### API Python
+
+`fmk.py` è anche importabile (funzioni pure, JSON-serializzabili):
+
+```python
+from fae.fmk import info, extract, build
+layout = info("firmware.bin")                    # dict: offset, partizioni, coda…
+cfg    = extract("firmware.bin", "work")          # spacchetta, ritorna il config
+build("work", "new.bin", nopad=False)             # ricompone → path del .bin
+```
+
+---
+
+## Comandi e opzioni
+
+Sottocomandi: **`run`** (emulazione) e **`info`** / **`extract`** / **`build`** (analisi/pack).
+
+### `run` — emula un firmware o una rootfs spacchettata
+
+```
+./sae run <firmware|dir> [opzioni]
 ```
 
 | Opzione | Default | Descrizione |
 |---|---|---|
-| `firmware` | — | path del `.bin` da emulare (posizionale) |
+| `firmware` | — | path del `.bin`, **oppure** una dir di `sae extract` (emula il rootfs modificato) |
 | `--brand B` | `auto` | etichetta brand del dispositivo |
 | `--iid N` | `1` | id istanza (per run multipli) |
 | `--root PATH` | repo | radice del progetto (dove stanno `assets/`) |
@@ -173,7 +295,25 @@ Sottocomando unico: **`run`**.
 
 # tieni il dispositivo vivo per esplorarlo (browser + shell)
 ./sae run firmwares/mod10.bin --keep-alive
+
+# emula una rootfs già spacchettata e modificata (niente ripack)
+./sae run work
 ```
+
+### `info` / `extract` / `build` — pack/unpack (vedi §[Analisi firmware](#analisi-firmware-unpack--modifica--emulaflash))
+
+```
+./sae info    <firmware>
+./sae extract <firmware> [-o <dir>] [--tail-offset 0xNNN]
+./sae build   <dir>      [-o <out.bin>] [--nopad]
+```
+
+| Opzione | Comando | Descrizione |
+|---|---|---|
+| `-o, --workdir <dir>` | `extract` | dir di destinazione (default: `<firmware>.fmk`) |
+| `--tail-offset 0xNNN` | `extract`, `info` | inizio della coda preservata (ART/config) su dump full-chip; senza, auto-detect |
+| `-o, --out <file>` | `build` | path del `.bin` da scrivere (default: `<dir>/new.bin`) |
+| `--nopad` | `build` | output solo `header+rootfs` (immagine OTA parziale, **non** per flash full-chip: perderebbe la coda) |
 
 ---
 
@@ -246,6 +386,11 @@ sudo ./setup-tap.sh sae0 down            # smonta quando hai finito
 Esistono due sorgenti di verità: la **directory rootfs** estratta
 (`scratch/<slug>/extract/.../`, file normali di tua proprietà) e l'immagine
 `image.ext2` montata `rw` nel guest.
+
+> Per un rootfs pulito e ricomponibile in un `.bin` flashabile usa invece
+> `./sae extract` → edita `work/rootfs/` → `./sae run work` (emula) o `./sae build work`
+> (ripack), vedi §[Analisi firmware](#analisi-firmware-unpack--modifica--emulaflash).
+> Quello sotto è il percorso legacy che parte direttamente dal `.bin`.
 
 ### A dispositivo spento (offline)
 
@@ -423,14 +568,15 @@ debugfs -R "ls -l /dev"                   scratch/<slug>/image.ext2
 ## Struttura del progetto
 
 ```
-sae                     launcher (./sae run <firmware>)
+sae                     launcher (./sae run|info|extract|build …)
 check-deps.sh           verifica/installa le dipendenze host
 setup-tap.sh            crea/rimuove il TAP per il verify su IP statico
 
 reimpl/fae/
   cli.py                entrypoint argparse (comando `run` + esempi)
   pipeline.py           orchestratore: extract → arch → image → boot×2 → verify
-  extract.py            wrapper binwalk v3 → directory rootfs
+  extract.py            wrapper binwalk v3 → directory rootfs (per `run`)
+  fmk.py                pack/unpack + checksum vendor (info/extract/build, --selftest)
   arch.py               rilevamento architettura/endianness
   image.py              build ext2 rootless (mke2fs -d + debugfs mknod)
   qemu.py               lifecycle QEMU (Popen + QMP), builder command line, netdev
